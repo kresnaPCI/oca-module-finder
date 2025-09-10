@@ -1,6 +1,7 @@
 import streamlit as st
 import requests
 import pandas as pd
+import os
 
 # --- GitHub API helper ---
 class GitHubAPI:
@@ -97,7 +98,8 @@ st.write("Check if OCA modules exist for a given Odoo version.")
 
 modules_input = st.text_area("Modules (one per line)", "stock_picking_batch\nsale_order_type\naccount_invoice_import")
 target_version = st.text_input("Odoo version", "18.0")
-github_token = st.text_input("GitHub Token (optional, recommended to avoid rate limits)", type="password")
+github_token = os.getenv("GITHUB_TOKEN")
+
 
 if st.button("Check Modules"):
     module_list = [m.strip() for m in modules_input.splitlines() if m.strip()]
