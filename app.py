@@ -1,6 +1,6 @@
 import streamlit as st
 import requests
-from urllib.parse import urlparse
+import pandas as pd
 
 # --- GitHub API helper ---
 class GitHubAPI:
@@ -27,12 +27,8 @@ class GitHubAPI:
             st.error(f"Error fetching {url}: {e}")
             return None
 
-    def check_branch_exists(self, owner, repo, branch):
-        url = f"https://api.github.com/repos/{owner}/{repo}/branches/{branch}"
-        return self.get(url) is not None
-
-    def list_repos(self, org="OCA", max_pages=5):
-        """Get list of repos from OCA org (limited pages for performance)."""
+    def list_repos(self, org="OCA", max_pages=10):
+        """Get all repos from OCA org (up to ~1000 repos)."""
         repos = []
         for page in range(1, max_pages+1):
             url = f"https://api.github.com/orgs/{org}/repos?per_page=100&page={page}"
@@ -45,36 +41,61 @@ class GitHubAPI:
         return repos
 
 
-# --- OCA Module Checker ---
-class OCAModuleChecker:
-    def __init__(self, target_version="18.0", github_token=None):
-        self.target_version = target_version
-        self.github = GitHubAPI(token=github_token)
+# --- Cached functions ---
+@st.cache_data(show_spinner=False)
+def get_repos(token):
+    gh = GitHubAPI(token)
+    return gh.list_repos("OCA", max_pages=12)  # fetch all OCA repos (~1200+)
 
-    def check_module(self, module_name):
-        repos = self.github.list_repos("OCA", max_pages=5)  # can adjust pages if needed
-        for repo in repos:
-            owner = repo["owner"]["login"]
-            repo_name = repo["name"]
 
-            # Check branch exists
-            if not self.github.check_branch_exists(owner, repo_name, self.target_version):
-                continue
+@st.cache_data(show_spinner=False)
+def get_repo_modules(owner, repo, branch, token):
+    """Return list of folders (modules) in repo branch."""
+    gh = GitHubAPI(token)
+    url = f"https://api.github.com/repos/{owner}/{repo}/contents?ref={branch}"
+    data = gh.get(url)
+    if not data:
+        return []
+    return [item["name"] for item in data if item["type"] == "dir"]
 
-            # Check if module folder exists
-            api_url = f"https://api.github.com/repos/{owner}/{repo_name}/contents/{module_name}?ref={self.target_version}"
-            result = self.github.get(api_url)
-            if result:
-                return True, f"https://github.com/{owner}/{repo_name}/tree/{self.target_version}/{module_name}"
 
-        return False, ""
+# --- Module checker ---
+def check_modules(modules, target_version, token):
+    repos = get_repos(token)
+    results = {m: {"Available": "❌ No", "URL": "-"} for m in modules}
+
+    for repo in repos:
+        owner = repo["owner"]["login"]
+        repo_name = repo["name"]
+
+        # Get all module folders in one call
+        repo_modules = get_repo_modules(owner, repo_name, target_version, token)
+        if not repo_modules:
+            continue
+
+        for m in modules:
+            if results[m]["Available"] == "✅ Yes":
+                continue  # already found
+
+            if m in repo_modules:
+                results[m] = {
+                    "Available": "✅ Yes",
+                    "URL": f"https://github.com/{owner}/{repo_name}/tree/{target_version}/{m}"
+                }
+
+    # Convert dict → DataFrame
+    df = pd.DataFrame([
+        {"Module": m, "Available": results[m]["Available"], "URL": results[m]["URL"]}
+        for m in modules
+    ])
+    return df
 
 
 # --- Streamlit UI ---
 st.title("🔎 OCA Module Availability Checker")
-st.write("Enter a list of **OCA module technical names** (one per line):")
+st.write("Check if OCA modules exist for a given Odoo version.")
 
-modules_input = st.text_area("Modules", "stock_picking_batch\nsale_order_type")
+modules_input = st.text_area("Modules (one per line)", "stock_picking_batch\nsale_order_type\naccount_invoice_import")
 target_version = st.text_input("Odoo version", "18.0")
 github_token = st.text_input("GitHub Token (optional, recommended to avoid rate limits)", type="password")
 
@@ -83,18 +104,12 @@ if st.button("Check Modules"):
     if not module_list:
         st.warning("Please enter at least one module name.")
     else:
-        checker = OCAModuleChecker(target_version, github_token)
-        results = []
-
-        progress = st.progress(0)
-        for i, module in enumerate(module_list, start=1):
-            available, url = checker.check_module(module)
-            results.append({
-                "Module": module,
-                "Available": "✅ Yes" if available else "❌ No",
-                "URL": url or "-"
-            })
-            progress.progress(i / len(module_list))
+        with st.spinner("Checking modules... this may take some time for the first run."):
+            df = check_modules(module_list, target_version, github_token)
 
         st.subheader("Results")
-        st.dataframe(results)
+        st.dataframe(df, use_container_width=True)
+
+        # CSV Export
+        csv = df.to_csv(index=False).encode("utf-8")
+        st.download_button("📥 Download CSV", data=csv, file_name="oca_module_check.csv", mime="text/csv")
